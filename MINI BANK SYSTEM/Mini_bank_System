@@ -1,0 +1,388 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define MAX_NAME     50
+#define DATA_FILE    "accounts.dat"
+#define LOG_FILE     "transactions.log"
+
+/* ─── Data Structures ─────────────────────────── */
+
+typedef struct {
+    int    accNo;
+    char   name[MAX_NAME];
+    char   accType[10];   /* "Savings" or "Current" */
+    double balance;
+} Account;
+
+typedef struct {
+    int    accNo;
+    char   type[10];      /* "DEPOSIT", "WITHDRAW", "TRANSFER" */
+    double amount;
+    char   date[20];      /* simple string timestamp */
+} Transaction;
+
+/* ─── Utility: Get current date string ─────────── */
+void getDate(char *buf) {
+    /* Using __DATE__ and __TIME__ as a lightweight substitute */
+    /* In a real system you'd use time.h / localtime()         */
+    strcpy(buf, __DATE__);
+    strcat(buf, " ");
+    strcat(buf, __TIME__);
+}
+
+/* ─── File I/O helpers ──────────────────────────── */
+
+/* Return total number of accounts stored in file */
+int countAccounts(void) {
+    FILE *fp = fopen(DATA_FILE, "rb");
+    if (!fp) return 0;
+    fseek(fp, 0, SEEK_END);
+    int n = (int)(ftell(fp) / sizeof(Account));
+    fclose(fp);
+    return n;
+}
+
+/* Write a transaction record to the log file */
+void logTransaction(Transaction *t) {
+    FILE *fp = fopen(LOG_FILE, "ab");
+    if (!fp) { perror("Log file error"); return; }
+    fwrite(t, sizeof(Transaction), 1, fp);
+    fclose(fp);
+}
+
+/* ─── Core Account Operations ───────────────────── */
+
+/* 1. Create a new account */
+void createAccount(void) {
+    Account a;
+    FILE *fp;
+
+    printf("\n===== CREATE ACCOUNT =====\n");
+
+    /* Auto-generate account number */
+    a.accNo = 1000 + countAccounts() + 1;
+
+    printf("Enter Name          : ");
+    getchar();                  /* flush newline */
+    fgets(a.name, MAX_NAME, stdin);
+    a.name[strcspn(a.name, "\n")] = '\0';   /* trim newline */
+
+    printf("Account Type (Savings/Current): ");
+    scanf("%9s", a.accType);
+
+    printf("Initial Deposit (Rs): ");
+    scanf("%lf", &a.balance);
+
+    if (a.balance < 0) {
+        printf("[!] Balance cannot be negative.\n");
+        return;
+    }
+
+    /* Append to binary file */
+    fp = fopen(DATA_FILE, "ab");
+    if (!fp) { perror("Cannot open data file"); return; }
+    fwrite(&a, sizeof(Account), 1, fp);
+    fclose(fp);
+
+    /* Log it */
+    Transaction t;
+    t.accNo  = a.accNo;
+    strcpy(t.type, "DEPOSIT");
+    t.amount = a.balance;
+    getDate(t.date);
+    logTransaction(&t);
+
+    printf("[+] Account created! Your Account No: %d\n", a.accNo);
+}
+
+/* 2. Deposit money */
+void deposit(void) {
+    int accNo;
+    double amount;
+    Account a;
+    int found = 0;
+
+    printf("\n===== DEPOSIT =====\n");
+    printf("Enter Account No: ");
+    scanf("%d", &accNo);
+    printf("Amount to Deposit: Rs ");
+    scanf("%lf", &amount);
+
+    if (amount <= 0) { printf("[!] Invalid amount.\n"); return; }
+
+    FILE *fp = fopen(DATA_FILE, "r+b");
+    if (!fp) { printf("[!] No accounts found.\n"); return; }
+
+    while (fread(&a, sizeof(Account), 1, fp)) {
+        if (a.accNo == accNo) {
+            a.balance += amount;
+            fseek(fp, -(long)sizeof(Account), SEEK_CUR);
+            fwrite(&a, sizeof(Account), 1, fp);
+            found = 1;
+            break;
+        }
+    }
+    fclose(fp);
+
+    if (!found) { printf("[!] Account not found.\n"); return; }
+
+    Transaction t = { accNo, "DEPOSIT", amount };
+    getDate(t.date);
+    logTransaction(&t);
+
+    printf("[+] Rs %.2f deposited. New Balance: Rs %.2f\n", amount, a.balance);
+}
+
+/* 3. Withdraw money */
+void withdraw(void) {
+    int accNo;
+    double amount;
+    Account a;
+    int found = 0;
+
+    printf("\n===== WITHDRAW =====\n");
+    printf("Enter Account No: ");
+    scanf("%d", &accNo);
+    printf("Amount to Withdraw: Rs ");
+    scanf("%lf", &amount);
+
+    if (amount <= 0) { printf("[!] Invalid amount.\n"); return; }
+
+    FILE *fp = fopen(DATA_FILE, "r+b");
+    if (!fp) { printf("[!] No accounts found.\n"); return; }
+
+    while (fread(&a, sizeof(Account), 1, fp)) {
+        if (a.accNo == accNo) {
+            if (a.balance < amount) {
+                printf("[!] Insufficient balance (Rs %.2f).\n", a.balance);
+                fclose(fp);
+                return;
+            }
+            a.balance -= amount;
+            fseek(fp, -(long)sizeof(Account), SEEK_CUR);
+            fwrite(&a, sizeof(Account), 1, fp);
+            found = 1;
+            break;
+        }
+    }
+    fclose(fp);
+
+    if (!found) { printf("[!] Account not found.\n"); return; }
+
+    Transaction t = { accNo, "WITHDRAW", amount };
+    getDate(t.date);
+    logTransaction(&t);
+
+    printf("[+] Rs %.2f withdrawn. New Balance: Rs %.2f\n", amount, a.balance);
+}
+
+/* 4. Transfer between accounts */
+void transfer(void) {
+    int fromAcc, toAcc;
+    double amount;
+    Account a, b;
+    long posA = -1, posB = -1;
+
+    printf("\n===== TRANSFER =====\n");
+    printf("From Account No: "); scanf("%d", &fromAcc);
+    printf("To   Account No: "); scanf("%d", &toAcc);
+    printf("Amount Rs       : "); scanf("%lf", &amount);
+
+    if (amount <= 0) { printf("[!] Invalid amount.\n"); return; }
+    if (fromAcc == toAcc) { printf("[!] Same account.\n"); return; }
+
+    FILE *fp = fopen(DATA_FILE, "r+b");
+    if (!fp) { printf("[!] No accounts found.\n"); return; }
+
+    long pos = 0;
+    while (fread(&a, sizeof(Account), 1, fp)) {
+        if (a.accNo == fromAcc) { posA = pos; }
+        if (a.accNo == toAcc)   { posB = pos; b = a; }
+        pos = ftell(fp);
+    }
+
+    if (posA < 0 || posB < 0) {
+        printf("[!] One or both accounts not found.\n");
+        fclose(fp); return;
+    }
+
+    /* Re-read from account to get fresh copy */
+    fseek(fp, posA, SEEK_SET);
+    fread(&a, sizeof(Account), 1, fp);
+
+    if (a.balance < amount) {
+        printf("[!] Insufficient balance (Rs %.2f).\n", a.balance);
+        fclose(fp); return;
+    }
+
+    a.balance -= amount;
+    fseek(fp, posA, SEEK_SET);
+    fwrite(&a, sizeof(Account), 1, fp);
+
+    fseek(fp, posB, SEEK_SET);
+    fread(&b, sizeof(Account), 1, fp);
+    b.balance += amount;
+    fseek(fp, posB, SEEK_SET);
+    fwrite(&b, sizeof(Account), 1, fp);
+
+    fclose(fp);
+
+    Transaction t = { fromAcc, "TRANSFER", amount };
+    getDate(t.date);
+    logTransaction(&t);
+
+    printf("[+] Rs %.2f transferred from Acc %d to Acc %d.\n",
+           amount, fromAcc, toAcc);
+}
+
+/* 5. Check balance */
+void checkBalance(void) {
+    int accNo;
+    Account a;
+    int found = 0;
+
+    printf("\n===== BALANCE ENQUIRY =====\n");
+    printf("Enter Account No: ");
+    scanf("%d", &accNo);
+
+    FILE *fp = fopen(DATA_FILE, "rb");
+    if (!fp) { printf("[!] No accounts found.\n"); return; }
+
+    while (fread(&a, sizeof(Account), 1, fp)) {
+        if (a.accNo == accNo) {
+            printf("\n  Account No  : %d\n", a.accNo);
+            printf("  Name        : %s\n",   a.name);
+            printf("  Type        : %s\n",   a.accType);
+            printf("  Balance     : Rs %.2f\n", a.balance);
+            found = 1;
+            break;
+        }
+    }
+    fclose(fp);
+
+    if (!found) printf("[!] Account not found.\n");
+}
+
+/* 6. List all accounts */
+void listAllAccounts(void) {
+    Account a;
+    int count = 0;
+
+    printf("\n===== ALL ACCOUNTS =====\n");
+    printf("%-10s %-25s %-10s %s\n", "Acc No", "Name", "Type", "Balance (Rs)");
+    printf("%s\n", "-----------------------------------------------------------");
+
+    FILE *fp = fopen(DATA_FILE, "rb");
+    if (!fp) { printf("[!] No accounts found.\n"); return; }
+
+    while (fread(&a, sizeof(Account), 1, fp)) {
+        printf("%-10d %-25s %-10s %.2f\n",
+               a.accNo, a.name, a.accType, a.balance);
+        count++;
+    }
+    fclose(fp);
+
+    printf("%s\n", "-----------------------------------------------------------");
+    printf("Total Accounts: %d\n", count);
+}
+
+/* 7. Transaction history for an account */
+void transactionHistory(void) {
+    int accNo;
+    Transaction t;
+    int found = 0;
+
+    printf("\n===== TRANSACTION HISTORY =====\n");
+    printf("Enter Account No: ");
+    scanf("%d", &accNo);
+
+    FILE *fp = fopen(LOG_FILE, "rb");
+    if (!fp) { printf("[!] No transaction log found.\n"); return; }
+
+    printf("\n%-12s %-10s %-12s %s\n", "Acc No", "Type", "Amount (Rs)", "Date");
+    printf("%s\n", "------------------------------------------------------");
+
+    while (fread(&t, sizeof(Transaction), 1, fp)) {
+        if (t.accNo == accNo) {
+            printf("%-12d %-10s %-12.2f %s\n",
+                   t.accNo, t.type, t.amount, t.date);
+            found = 1;
+        }
+    }
+    fclose(fp);
+
+    if (!found) printf("[!] No transactions for this account.\n");
+}
+
+/* 8. Delete an account */
+void deleteAccount(void) {
+    int accNo;
+    Account a;
+    int found = 0;
+
+    printf("\n===== DELETE ACCOUNT =====\n");
+    printf("Enter Account No to delete: ");
+    scanf("%d", &accNo);
+
+    FILE *fp  = fopen(DATA_FILE, "rb");
+    FILE *tmp = fopen("temp.dat", "wb");
+    if (!fp || !tmp) { perror("File error"); return; }
+
+    while (fread(&a, sizeof(Account), 1, fp)) {
+        if (a.accNo == accNo) { found = 1; continue; }
+        fwrite(&a, sizeof(Account), 1, tmp);
+    }
+    fclose(fp);
+    fclose(tmp);
+
+    remove(DATA_FILE);
+    rename("temp.dat", DATA_FILE);
+
+    if (found) printf("[+] Account %d deleted.\n", accNo);
+    else       printf("[!] Account not found.\n");
+}
+
+/* ─── Main Menu ─────────────────────────────────── */
+
+void menu(void) {
+    printf("\n");
+    printf("╔══════════════════════════════╗\n");
+    printf("║    MINI BANK SYSTEM  (C)     ║\n");
+    printf("╠══════════════════════════════╣\n");
+    printf("║  1. Create Account           ║\n");
+    printf("║  2. Deposit                  ║\n");
+    printf("║  3. Withdraw                 ║\n");
+    printf("║  4. Transfer                 ║\n");
+    printf("║  5. Balance Enquiry          ║\n");
+    printf("║  6. List All Accounts        ║\n");
+    printf("║  7. Transaction History      ║\n");
+    printf("║  8. Delete Account           ║\n");
+    printf("║  0. Exit                     ║\n");
+    printf("╚══════════════════════════════╝\n");
+    printf("Choice: ");
+}
+
+int main(void) {
+    int choice;
+
+    do {
+        menu();
+        scanf("%d", &choice);
+
+        switch (choice) {
+            case 1: createAccount();      break;
+            case 2: deposit();            break;
+            case 3: withdraw();           break;
+            case 4: transfer();           break;
+            case 5: checkBalance();       break;
+            case 6: listAllAccounts();    break;
+            case 7: transactionHistory(); break;
+            case 8: deleteAccount();      break;
+            case 0: printf("\nGoodbye!\n"); break;
+            default: printf("[!] Invalid option.\n");
+        }
+    } while (choice != 0);
+
+    return 0;
+}
