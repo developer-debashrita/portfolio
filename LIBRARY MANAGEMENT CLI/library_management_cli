@@ -1,0 +1,341 @@
+import json
+import os
+from datetime import datetime, timedelta
+
+# ── File paths ────────────────────────────────────────────────────────────────
+BOOKS_FILE    = "books.json"
+MEMBERS_FILE  = "members.json"
+ISSUED_FILE   = "issued.json"
+LOG_FILE      = "library_log.txt"
+
+LOAN_DAYS = 14  # default loan period
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FILE I/O HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_json(filepath: str) -> dict | list:
+    """Load JSON data from file; return empty dict/list if file missing."""
+    if not os.path.exists(filepath):
+        return {}
+    with open(filepath, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_json(filepath: str, data: dict | list) -> None:
+    """Persist data to a JSON file with pretty-printing."""
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+
+def log_action(action: str) -> None:
+    """Append a timestamped entry to the log file."""
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        f.write(f"[{timestamp}] {action}\n")
+
+
+def view_log(n: int = 20) -> None:
+    """Display the last n lines of the activity log."""
+    if not os.path.exists(LOG_FILE):
+        print("  No log file found.")
+        return
+    with open(LOG_FILE, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    recent = lines[-n:] if len(lines) >= n else lines
+    print(f"\n  ── Last {len(recent)} log entries ──")
+    for line in recent:
+        print(" ", line.rstrip())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BOOK OPERATIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def add_book() -> None:
+    books = load_json(BOOKS_FILE)
+    book_id = input("  Enter Book ID   : ").strip()
+    if not book_id:
+        print("  ✗ Book ID cannot be empty.")
+        return
+    if book_id in books:
+        print(f"  ✗ Book '{book_id}' already exists.")
+        return
+
+    title  = input("  Enter Title     : ").strip()
+    author = input("  Enter Author    : ").strip()
+    copies = input("  Total Copies    : ").strip()
+
+    if not copies.isdigit() or int(copies) < 1:
+        print("  ✗ Copies must be a positive integer.")
+        return
+
+    books[book_id] = {
+        "title"          : title,
+        "author"         : author,
+        "total_copies"   : int(copies),
+        "available_copies": int(copies),
+    }
+    save_json(BOOKS_FILE, books)
+    log_action(f"ADD BOOK  | ID={book_id} | \"{title}\" by {author} | copies={copies}")
+    print(f"  ✓ Book '{title}' added successfully.")
+
+
+def view_books() -> None:
+    books = load_json(BOOKS_FILE)
+    if not books:
+        print("  No books in the library yet.")
+        return
+    print(f"\n  {'ID':<10} {'Title':<30} {'Author':<22} {'Available':>9} {'Total':>6}")
+    print("  " + "─" * 82)
+    for bid, b in books.items():
+        avail = b["available_copies"]
+        total = b["total_copies"]
+        flag  = " ✗" if avail == 0 else ""
+        print(f"  {bid:<10} {b['title']:<30} {b['author']:<22} {avail:>9} {total:>6}{flag}")
+
+
+def search_book() -> None:
+    books  = load_json(BOOKS_FILE)
+    query  = input("  Search (title / author / ID): ").strip().lower()
+    found  = {bid: b for bid, b in books.items()
+              if query in bid.lower()
+              or query in b["title"].lower()
+              or query in b["author"].lower()}
+    if not found:
+        print("  No matching books found.")
+    else:
+        print(f"\n  Found {len(found)} result(s):")
+        for bid, b in found.items():
+            print(f"    [{bid}] \"{b['title']}\" — {b['author']} "
+                  f"| Available: {b['available_copies']}/{b['total_copies']}")
+
+
+def delete_book() -> None:
+    books = load_json(BOOKS_FILE)
+    book_id = input("  Enter Book ID to delete: ").strip()
+    if book_id not in books:
+        print("  ✗ Book not found.")
+        return
+    issued = load_json(ISSUED_FILE)
+    in_use = any(r["book_id"] == book_id for r in issued.values())
+    if in_use:
+        print("  ✗ Cannot delete — this book has active loans.")
+        return
+    title = books.pop(book_id)["title"]
+    save_json(BOOKS_FILE, books)
+    log_action(f"DEL BOOK  | ID={book_id} | \"{title}\"")
+    print(f"  ✓ Book '{title}' deleted.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MEMBER OPERATIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def add_member() -> None:
+    members   = load_json(MEMBERS_FILE)
+    member_id = input("  Enter Member ID : ").strip()
+    if not member_id:
+        print("  ✗ Member ID cannot be empty.")
+        return
+    if member_id in members:
+        print(f"  ✗ Member '{member_id}' already exists.")
+        return
+
+    name  = input("  Enter Name      : ").strip()
+    email = input("  Enter Email     : ").strip()
+
+    members[member_id] = {"name": name, "email": email, "books_issued": []}
+    save_json(MEMBERS_FILE, members)
+    log_action(f"ADD MEMBER| ID={member_id} | {name} | {email}")
+    print(f"  ✓ Member '{name}' registered.")
+
+
+def view_members() -> None:
+    members = load_json(MEMBERS_FILE)
+    if not members:
+        print("  No members registered yet.")
+        return
+    print(f"\n  {'ID':<12} {'Name':<25} {'Email':<30} {'Books Held':>10}")
+    print("  " + "─" * 82)
+    for mid, m in members.items():
+        print(f"  {mid:<12} {m['name']:<25} {m['email']:<30} {len(m['books_issued']):>10}")
+
+
+def delete_member() -> None:
+    members   = load_json(MEMBERS_FILE)
+    member_id = input("  Enter Member ID to delete: ").strip()
+    if member_id not in members:
+        print("  ✗ Member not found.")
+        return
+    if members[member_id]["books_issued"]:
+        print("  ✗ Cannot delete — member has unreturned books.")
+        return
+    name = members.pop(member_id)["name"]
+    save_json(MEMBERS_FILE, members)
+    log_action(f"DEL MEMBER| ID={member_id} | {name}")
+    print(f"  ✓ Member '{name}' removed.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ISSUE / RETURN
+# ══════════════════════════════════════════════════════════════════════════════
+
+def issue_book() -> None:
+    books     = load_json(BOOKS_FILE)
+    members   = load_json(MEMBERS_FILE)
+    issued    = load_json(ISSUED_FILE)
+
+    book_id   = input("  Book ID         : ").strip()
+    member_id = input("  Member ID       : ").strip()
+
+    if book_id not in books:
+        print("  ✗ Book not found.")
+        return
+    if member_id not in members:
+        print("  ✗ Member not found.")
+        return
+    if books[book_id]["available_copies"] < 1:
+        print("  ✗ No available copies of this book.")
+        return
+
+    # build a unique transaction key
+    tx_id       = f"TX{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    issue_date  = datetime.now().strftime("%Y-%m-%d")
+    due_date    = (datetime.now() + timedelta(days=LOAN_DAYS)).strftime("%Y-%m-%d")
+
+    issued[tx_id] = {
+        "book_id"   : book_id,
+        "member_id" : member_id,
+        "issue_date": issue_date,
+        "due_date"  : due_date,
+    }
+    books[book_id]["available_copies"] -= 1
+    members[member_id]["books_issued"].append(tx_id)
+
+    save_json(ISSUED_FILE, issued)
+    save_json(BOOKS_FILE,  books)
+    save_json(MEMBERS_FILE, members)
+    log_action(f"ISSUE     | TX={tx_id} | Book={book_id} | Member={member_id} | Due={due_date}")
+    print(f"  ✓ Book issued! Transaction ID: {tx_id}  |  Due: {due_date}")
+
+
+def return_book() -> None:
+    books   = load_json(BOOKS_FILE)
+    members = load_json(MEMBERS_FILE)
+    issued  = load_json(ISSUED_FILE)
+
+    tx_id = input("  Transaction ID  : ").strip()
+    if tx_id not in issued:
+        print("  ✗ Transaction not found.")
+        return
+
+    record    = issued.pop(tx_id)
+    book_id   = record["book_id"]
+    member_id = record["member_id"]
+    due_date  = datetime.strptime(record["due_date"], "%Y-%m-%d")
+    today     = datetime.now()
+    overdue   = (today - due_date).days
+
+    books[book_id]["available_copies"] += 1
+    members[member_id]["books_issued"].remove(tx_id)
+
+    save_json(ISSUED_FILE, issued)
+    save_json(BOOKS_FILE,  books)
+    save_json(MEMBERS_FILE, members)
+
+    fine_msg = ""
+    if overdue > 0:
+        fine    = overdue * 2          # ₹2 per day
+        fine_msg = f"  ⚠  Overdue by {overdue} day(s). Fine: ₹{fine}"
+
+    log_action(f"RETURN    | TX={tx_id} | Book={book_id} | Member={member_id}"
+               + (f" | OVERDUE {overdue}d" if overdue > 0 else ""))
+    print(f"  ✓ Book returned successfully.")
+    if fine_msg:
+        print(fine_msg)
+
+
+def view_issued() -> None:
+    issued  = load_json(ISSUED_FILE)
+    books   = load_json(BOOKS_FILE)
+    members = load_json(MEMBERS_FILE)
+    if not issued:
+        print("  No books currently issued.")
+        return
+    today = datetime.now()
+    print(f"\n  {'TX ID':<20} {'Book':<30} {'Member':<20} {'Due Date':<12} {'Status'}")
+    print("  " + "─" * 95)
+    for tx, r in issued.items():
+        due   = datetime.strptime(r["due_date"], "%Y-%m-%d")
+        late  = (today - due).days
+        status = f"OVERDUE {late}d" if late > 0 else "On Time"
+        b_title = books.get(r["book_id"], {}).get("title", r["book_id"])
+        m_name  = members.get(r["member_id"], {}).get("name", r["member_id"])
+        print(f"  {tx:<20} {b_title:<30} {m_name:<20} {r['due_date']:<12} {status}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MENU
+# ══════════════════════════════════════════════════════════════════════════════
+
+MENU = """
+╔══════════════════════════════════╗
+║   📚  LIBRARY MANAGEMENT CLI    ║
+╠══════════════════════════════════╣
+║  BOOKS                           ║
+║   1. Add Book                    ║
+║   2. View All Books              ║
+║   3. Search Book                 ║
+║   4. Delete Book                 ║
+╠══════════════════════════════════╣
+║  MEMBERS                         ║
+║   5. Register Member             ║
+║   6. View All Members            ║
+║   7. Delete Member               ║
+╠══════════════════════════════════╣
+║  TRANSACTIONS                    ║
+║   8. Issue Book                  ║
+║   9. Return Book                 ║
+║  10. View Issued Books           ║
+╠══════════════════════════════════╣
+║  MISC                            ║
+║  11. View Activity Log           ║
+║   0. Exit                        ║
+╚══════════════════════════════════╝"""
+
+ACTIONS = {
+    "1" : add_book,
+    "2" : view_books,
+    "3" : search_book,
+    "4" : delete_book,
+    "5" : add_member,
+    "6" : view_members,
+    "7" : delete_member,
+    "8" : issue_book,
+    "9" : return_book,
+    "10": view_issued,
+    "11": view_log,
+}
+
+
+def main() -> None:
+    print("\n  Welcome to the Library Management System")
+    while True:
+        print(MENU)
+        choice = input("  Enter choice: ").strip()
+        if choice == "0":
+            print("\n  Goodbye! 📖\n")
+            break
+        action = ACTIONS.get(choice)
+        if action:
+            print()
+            action()
+        else:
+            print("  ✗ Invalid option. Please try again.")
+        input("\n  Press Enter to continue...")
+
+
+if __name__ == "__main__":
+    main()
